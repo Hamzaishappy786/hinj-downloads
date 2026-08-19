@@ -27,6 +27,14 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Cache Puppeteer
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.cache/puppeteer
+          key: puppeteer-21
+
       - name: Install Puppeteer
         run: npm install puppeteer@21
 
@@ -64,4 +72,3 @@ jobs:
           name: debug-screenshot
           path: output/
           retention-days: 1
- 
