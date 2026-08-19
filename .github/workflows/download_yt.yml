@@ -33,7 +33,7 @@ jobs:
           path: |
             node_modules
             ~/.cache/puppeteer
-          key: puppeteer-21
+          key: puppeteer-21-${{ runner.os }}
 
       - name: Install Puppeteer
         run: npm install puppeteer@21
