@@ -1,0 +1,66 @@
+name: Hinj YouTube Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube URL to download'
+        required: true
+        type: string
+      output_name:
+        description: 'Output filename base (no extension)'
+        required: false
+        default: 'audio'
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repo (needed for scripts/)
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer
+        run: npm install puppeteer@21
+
+      - name: Create output directory
+        run: mkdir -p output
+
+      - name: Download audio via y2mate.gs
+        run: node scripts/yt_download.js "${{ github.event.inputs.youtube_url }}"
+
+      - name: Verify output
+        run: |
+          ls -lh output/
+          if [ ! -f output/audio.mp3 ]; then
+            echo "ERROR: output/audio.mp3 not found"
+            exit 1
+          fi
+          SIZE=$(stat -c%s output/audio.mp3)
+          if [ "$SIZE" -lt 102400 ]; then
+            echo "ERROR: output/audio.mp3 is too small ($SIZE bytes) — download likely failed"
+            exit 1
+          fi
+          echo "OK: $(($SIZE / 1024)) KB"
+
+      - name: Upload audio artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hinj-audio
+          path: output/audio.mp3
+          retention-days: 1
+
+      - name: Take page screenshot on failure (for debugging)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: output/
+          retention-days: 1
