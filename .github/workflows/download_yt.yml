@@ -79,9 +79,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: |
-            output/after_conversion.png
-            output/after_click.png
-            output/error_no_input.png
+          path: output/*.png
           if-no-files-found: ignore
           retention-days: 1

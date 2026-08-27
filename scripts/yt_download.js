@@ -2,13 +2,15 @@
  * Puppeteer script: downloads YouTube audio via y2mate.gs
  * Usage: node yt_download.js "<youtube-url>"
  * Output: ./output/audio.mp3
+ *
+ * Every action is logged so GitHub Actions output shows exactly what happened.
  */
 
-const puppeteer = require('puppeteer-core');
-const fs        = require('fs');
-const path      = require('path');
-const https     = require('https');
-const http      = require('http');
+const puppeteer  = require('puppeteer-core');
+const fs         = require('fs');
+const path       = require('path');
+const https      = require('https');
+const http       = require('http');
 const { execSync } = require('child_process');
 
 const ytUrl = process.argv[2];
@@ -18,180 +20,312 @@ if (!ytUrl) {
 }
 
 const OUTPUT_DIR = path.resolve('./output');
+fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function log(step, msg) {
+  console.log(`[${step}] ${msg}`);
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+async function screenshot(page, name) {
+  const p = path.join(OUTPUT_DIR, name);
+  await page.screenshot({ path: p, fullPage: false }).catch(e => log('WARN', `screenshot failed: ${e.message}`));
+  log('SCREENSHOT', name);
+}
 
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
+    log('DOWNLOAD', `Starting download → ${url.slice(0, 120)}`);
     const out = fs.createWriteStream(dest);
     const get = url.startsWith('https:') ? https : http;
-    const headers = { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)', 'Referer': 'https://y2mate.gs/' };
-    get.get(url, { headers }, res => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        out.close();
-        downloadFile(res.headers.location, dest).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        out.close();
-        reject(new Error('HTTP ' + res.statusCode + ' downloading ' + url));
-        return;
-      }
-      res.pipe(out);
-      out.on('finish', () => { out.close(); resolve(); });
-    }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      'Referer':    'https://y2mate.gs/',
+    };
+    function doGet(u) {
+      get.get(u, { headers }, res => {
+        log('DOWNLOAD', `HTTP ${res.statusCode} ${u.slice(0, 80)}`);
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          log('DOWNLOAD', `Redirect → ${res.headers.location.slice(0, 80)}`);
+          out.close();
+          downloadFile(res.headers.location, dest).then(resolve).catch(reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          out.close();
+          reject(new Error('HTTP ' + res.statusCode + ' downloading ' + u));
+          return;
+        }
+        res.pipe(out);
+        let downloaded = 0;
+        res.on('data', chunk => { downloaded += chunk.length; });
+        out.on('finish', () => {
+          log('DOWNLOAD', `Done — ${(downloaded / 1024 / 1024).toFixed(2)} MB`);
+          out.close();
+          resolve();
+        });
+      }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
+    }
+    doGet(url);
   });
 }
 
+// Try to find an element using several selector strategies, returns the first that works
+async function findElement(page, strategies) {
+  for (const { type, selector, desc } of strategies) {
+    try {
+      let el = null;
+      if (type === 'xpath') {
+        const els = await page.$x(selector);
+        el = els.length > 0 ? els[0] : null;
+      } else if (type === 'css') {
+        el = await page.$(selector);
+      } else if (type === 'eval') {
+        el = await page.evaluateHandle(selector);
+        const valid = el && await page.evaluate(e => e !== null && e !== undefined && e.tagName !== undefined, el).catch(() => false);
+        if (!valid) el = null;
+      }
+      if (el) {
+        log('FIND', `Found via ${type}: ${desc}`);
+        return el;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 (async () => {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
   const execPath = process.env.PUPPETEER_EXECUTABLE_PATH
-    || execSync('which chromium-browser || which chromium || which google-chrome').toString().trim();
+    || execSync('which chromium-browser || which chromium || which google-chrome 2>/dev/null').toString().trim();
 
-  console.log('Using browser:', execPath);
+  log('INIT', `Browser: ${execPath}`);
+  log('INIT', `YouTube URL: ${ytUrl}`);
 
   const browser = await puppeteer.launch({
     headless: 'new',
     executablePath: execPath,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-           '--disable-gpu', '--window-size=1280,800'],
-    defaultViewport: { width: 1280, height: 800 }
+           '--disable-gpu', '--window-size=1280,900'],
+    defaultViewport: { width: 1280, height: 900 },
   });
 
   const page = await browser.newPage();
   let capturedAudioUrl = null;
+  let newTabUrl        = null;
 
-  // Intercept any audio/download responses
+  // Intercept audio responses
   page.on('response', response => {
-    const url  = response.url();
-    const ct   = (response.headers()['content-type']  || '').toLowerCase();
-    const cd   = (response.headers()['content-disposition'] || '').toLowerCase();
+    const url = response.url();
+    const ct  = (response.headers()['content-type']  || '').toLowerCase();
+    const cd  = (response.headers()['content-disposition'] || '').toLowerCase();
     if (ct.includes('audio/') || cd.includes('attachment') || /\.(mp3|m4a|ogg|webm)(\?|$)/.test(url)) {
       capturedAudioUrl = url;
-      console.log('[intercept] Audio URL captured:', url);
+      log('INTERCEPT', `Audio URL captured: ${url.slice(0, 100)}`);
     }
   });
 
-  // Watch for new tabs opened by the download button
-  let newTabUrl = null;
+  // Watch for new tabs
   browser.on('targetcreated', async target => {
-    await new Promise(r => setTimeout(r, 1500));
+    await sleep(1500);
     newTabUrl = target.url();
-    console.log('[newtab] Opened:', newTabUrl);
+    log('NEWTAB', `Opened: ${newTabUrl.slice(0, 100)}`);
   });
 
-  console.log('[1/5] Navigating to y2mate.gs...');
-  await page.goto('https://y2mate.gs', { waitUntil: 'networkidle2', timeout: 30_000 });
+  // ── Step 1: Navigate ──────────────────────────────────────────────────────
+  log('1/6', 'Navigating to y2mate.gs...');
+  await page.goto('https://y2mate.gs', { waitUntil: 'networkidle2', timeout: 40_000 });
+  log('1/6', `Page title: "${await page.title()}"`);
+  await screenshot(page, '01_home.png');
 
-  console.log('[2/5] Entering YouTube URL:', ytUrl);
-  const [urlInput] = await page.$x('/html/body/form/div[2]/input');
-  if (!urlInput) {
-    await page.screenshot({ path: path.join(OUTPUT_DIR, 'error_no_input.png') });
+  // ── Step 2: Find the URL input ────────────────────────────────────────────
+  log('2/6', 'Looking for URL input field...');
+  const inputEl = await findElement(page, [
+    { type: 'xpath', selector: '/html/body/form/div[2]/input', desc: 'XPath form input' },
+    { type: 'css',   selector: 'input[type="text"]',           desc: 'CSS input[type=text]' },
+    { type: 'css',   selector: 'input[name="url"]',            desc: 'CSS input[name=url]' },
+    { type: 'css',   selector: 'input[placeholder]',           desc: 'CSS input[placeholder]' },
+    { type: 'css',   selector: 'form input',                   desc: 'CSS form input (any)' },
+    { type: 'eval',  selector: () => document.querySelector('input') || null, desc: 'first input on page' },
+  ]);
+
+  if (!inputEl) {
+    await screenshot(page, '02_no_input.png');
+    // Dump all inputs for debugging
+    const inputs = await page.evaluate(() =>
+      [...document.querySelectorAll('input')].map(i =>
+        `<${i.tagName} type="${i.type}" name="${i.name}" placeholder="${i.placeholder}">`).join('\n')
+    );
+    log('DEBUG', `All inputs on page:\n${inputs || '(none)'}`);
     throw new Error('URL input not found — y2mate.gs layout may have changed');
   }
-  await urlInput.click({ clickCount: 3 });
+
+  // ── Step 3: Fill the URL input ────────────────────────────────────────────
+  log('3/6', `Clicking & typing YouTube URL into input...`);
+  await inputEl.click({ clickCount: 3 });
+  await sleep(300);
   await page.keyboard.type(ytUrl);
+  await sleep(300);
+  const typedValue = await page.evaluate(el => el.value, inputEl).catch(() => '?');
+  log('3/6', `Input value after typing: "${typedValue}"`);
+  await screenshot(page, '03_typed.png');
 
-  const [convertBtn] = await page.$x('/html/body/form/div[3]/button');
-  if (!convertBtn) throw new Error('Convert button not found');
+  // ── Step 4: Click the Convert / Search button ────────────────────────────
+  log('4/6', 'Looking for Convert/Search button...');
+  const convertBtn = await findElement(page, [
+    { type: 'xpath', selector: '/html/body/form/div[3]/button',                        desc: 'XPath form button' },
+    { type: 'xpath', selector: '/html/body/form/div[3]/button[1]',                     desc: 'XPath form button[1]' },
+    { type: 'css',   selector: 'form button[type="submit"]',                           desc: 'CSS form submit button' },
+    { type: 'css',   selector: 'form button',                                          desc: 'CSS form button (any)' },
+    { type: 'eval',  selector: () => {
+        const btns = [...document.querySelectorAll('button,input[type=submit]')];
+        return btns.find(b =>
+          /search|convert|go|start/i.test(b.textContent + b.value + b.getAttribute('aria-label') || '')
+        ) || btns[0] || null;
+    }, desc: 'button by text/aria' },
+  ]);
+
+  if (!convertBtn) {
+    await screenshot(page, '04_no_convert_btn.png');
+    const btns = await page.evaluate(() =>
+      [...document.querySelectorAll('button,input[type=submit]')].map(b =>
+        `<${b.tagName} type="${b.type}">${b.textContent.trim().slice(0,30)}`).join('\n')
+    );
+    log('DEBUG', `All buttons:\n${btns || '(none)'}`);
+    throw new Error('Convert button not found');
+  }
+
+  log('4/6', 'Clicking Convert button...');
   await convertBtn.click();
+  await sleep(500);
+  await screenshot(page, '04_after_convert_click.png');
 
-  console.log('[3/5] Waiting for conversion (20s)...');
-  await new Promise(r => setTimeout(r, 20_000));
+  // ── Step 5: Wait and retry for the Download button (10 attempts) ──────────
+  log('5/6', 'Waiting for conversion + download button (up to 10 tries × 8s each)...');
 
-  // Take screenshot so we can see what happened
-  await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_conversion.png') });
+  let audioUrl    = null;
+  let downloadBtn = null;
 
-  // Try to find the download URL directly from the page DOM (most reliable)
-  console.log('[4/5] Looking for download link in page...');
-  const audioUrl = await page.evaluate(() => {
-    // Check all anchor tags for mp3/audio hrefs
-    for (const a of document.querySelectorAll('a[href]')) {
-      const href = a.href || '';
-      if (/\.(mp3|m4a|ogg|webm)(\?|$)/i.test(href) || href.includes('download')) return href;
-    }
-    // Check buttons with data-url or onclick containing a URL
-    for (const btn of document.querySelectorAll('button, a')) {
-      const attrs = ['data-url', 'data-href', 'data-link', 'data-download'];
-      for (const attr of attrs) {
-        const val = btn.getAttribute(attr);
-        if (val && val.startsWith('http')) return val;
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    log('5/6', `Attempt ${attempt}/10 — waiting 8s...`);
+    await sleep(8_000);
+
+    // 1. Try to read audio URL directly from DOM (most reliable)
+    audioUrl = await page.evaluate(() => {
+      for (const a of document.querySelectorAll('a[href]')) {
+        const h = a.href || '';
+        if (/\.(mp3|m4a|ogg|webm)(\?|$)/i.test(h) || h.includes('download')) return h;
       }
-    }
-    // Check forms for action URLs pointing to audio
-    for (const form of document.querySelectorAll('form')) {
-      const action = form.action || '';
-      if (action.includes('download') || /\.(mp3|m4a)/.test(action)) return action;
-    }
-    return null;
-  });
-
-  if (audioUrl) {
-    console.log('[4/5] Found audio URL in DOM:', audioUrl);
-    console.log('[5/5] Downloading...');
-    await downloadFile(audioUrl, path.join(OUTPUT_DIR, 'audio.mp3'));
-  } else {
-    // Fall back: find a button/link containing "download" text and click it
-    console.log('[4/5] No URL in DOM, searching for download button by text...');
-    const dlBtn = await page.evaluateHandle(() => {
-      const candidates = [...document.querySelectorAll('button, a, input[type=submit]')];
-      return candidates.find(el => el.textContent.toLowerCase().includes('download')) || null;
+      for (const el of document.querySelectorAll('[data-url],[data-href],[data-link],[data-download]')) {
+        for (const attr of ['data-url','data-href','data-link','data-download']) {
+          const v = el.getAttribute(attr);
+          if (v && v.startsWith('http')) return v;
+        }
+      }
+      return null;
     });
 
-    const isValid = dlBtn && await page.evaluate(el => el !== null && el !== undefined, dlBtn);
-
-    if (isValid) {
-      const btnUrl = await page.evaluate(el => {
-        return el.getAttribute('data-url') || el.getAttribute('data-href')
-          || el.getAttribute('href') || null;
-      }, dlBtn);
-      console.log('Download button found, data URL:', btnUrl);
-
-      if (btnUrl && btnUrl.startsWith('http')) {
-        // Use the URL directly — most reliable
-        console.log('[5/5] Downloading from button URL:', btnUrl);
-        await downloadFile(btnUrl, path.join(OUTPUT_DIR, 'audio.mp3'));
-      } else {
-        await dlBtn.click();
-        await new Promise(r => setTimeout(r, 8_000));
-      }
-      await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_click.png') }).catch(() => {});
-    } else {
-      await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_click.png') }).catch(() => {});
-      console.log('No download button found by text search either');
+    if (audioUrl) {
+      log('5/6', `Audio URL found in DOM on attempt ${attempt}: ${audioUrl.slice(0,100)}`);
+      break;
     }
+
+    // 2. Check if a download button is visible now
+    downloadBtn = await findElement(page, [
+      // y2mate typically shows an <a> or <button> with mp3 text
+      { type: 'eval', selector: () => {
+          const all = [...document.querySelectorAll('a,button,input[type=button],input[type=submit]')];
+          return all.find(el => {
+            const t = (el.textContent + (el.getAttribute('aria-label')||'')).toLowerCase();
+            return t.includes('download') || t.includes('mp3') || t.includes('audio');
+          }) || null;
+      }, desc: 'button/link with download|mp3|audio text' },
+      { type: 'xpath', selector: '//a[contains(@class,"download")]',          desc: 'XPath a.download' },
+      { type: 'xpath', selector: '//button[contains(@class,"download")]',     desc: 'XPath button.download' },
+      { type: 'css',   selector: 'a.download, a[href*="download"]',          desc: 'CSS a.download or href*=download' },
+      { type: 'css',   selector: '.result a, .result button',                desc: 'CSS .result a/button' },
+    ]);
+
+    if (downloadBtn) {
+      log('5/6', `Download button found on attempt ${attempt}`);
+      break;
+    }
+
+    await screenshot(page, `05_attempt_${attempt}.png`);
+    log('5/6', `Attempt ${attempt}: nothing yet — page title: "${await page.title()}"`);
+
+    // Dump visible text to help debug
+    if (attempt === 3 || attempt === 6 || attempt === 10) {
+      const txt = await page.evaluate(() => document.body.innerText.slice(0, 500));
+      log('DEBUG', `Page text snippet:\n${txt}`);
+    }
+  }
+
+  await screenshot(page, '05_after_wait.png');
+
+  // ── Step 6: Download the audio ────────────────────────────────────────────
+  log('6/6', 'Attempting to obtain download URL...');
+  const dest = path.join(OUTPUT_DIR, 'audio.mp3');
+
+  if (audioUrl) {
+    log('6/6', `Downloading from DOM URL: ${audioUrl.slice(0,100)}`);
+    await downloadFile(audioUrl, dest);
+
+  } else if (downloadBtn) {
+    const btnUrl = await page.evaluate(el => {
+      return el.href || el.getAttribute('data-url') || el.getAttribute('data-href') || null;
+    }, downloadBtn);
+    log('6/6', `Download button data URL: ${btnUrl || '(none)'}`);
+
+    if (btnUrl && btnUrl.startsWith('http')) {
+      await downloadFile(btnUrl, dest);
+    } else {
+      log('6/6', 'Clicking download button...');
+      await downloadBtn.click();
+      await sleep(10_000);
+      await screenshot(page, '06_after_dl_click.png');
+    }
+
+  } else if (capturedAudioUrl) {
+    log('6/6', `Downloading from intercepted network URL: ${capturedAudioUrl.slice(0,100)}`);
+    await downloadFile(capturedAudioUrl, dest);
+
+  } else if (newTabUrl && newTabUrl.startsWith('http') && !newTabUrl.includes('y2mate.gs')) {
+    log('6/6', `Downloading from new-tab URL: ${newTabUrl.slice(0,100)}`);
+    await downloadFile(newTabUrl, dest);
+
+  } else {
+    await screenshot(page, '06_nothing_found.png');
+    throw new Error(
+      'No audio URL found after 10 attempts.\n' +
+      'Check screenshots (01_home.png … 05_attempt_*.png) uploaded as debug-screenshots artifact.'
+    );
   }
 
   await browser.close();
 
-  // Check if file was downloaded via browser or captured
-  const files = fs.readdirSync(OUTPUT_DIR)
-    .filter(f => /\.(mp3|m4a|webm|ogg)$/.test(f.toLowerCase()));
-
-  const dest = path.join(OUTPUT_DIR, 'audio.mp3');
-
+  // ── Verify ────────────────────────────────────────────────────────────────
+  const files = fs.readdirSync(OUTPUT_DIR).filter(f => /\.(mp3|m4a|webm|ogg)$/i.test(f));
   if (files.length > 0 && !files.includes('audio.mp3')) {
     fs.renameSync(path.join(OUTPUT_DIR, files[0]), dest);
-    console.log('Done! Renamed', files[0], 'to audio.mp3');
-  } else if (files.includes('audio.mp3')) {
-    console.log('Done! audio.mp3 already saved.');
-  } else if (capturedAudioUrl) {
-    console.log('[5/5] Downloading from intercepted URL...');
-    await downloadFile(capturedAudioUrl, dest);
-    console.log('Done!');
-  } else if (newTabUrl && newTabUrl.startsWith('http') && newTabUrl !== 'https://y2mate.gs/') {
-    console.log('[5/5] Downloading from new tab URL:', newTabUrl);
-    await downloadFile(newTabUrl, dest);
-    console.log('Done!');
-  } else {
-    throw new Error(
-      'No audio file was found.\n' +
-      'Check the uploaded screenshot artifacts (after_conversion.png, after_click.png)\n' +
-      'to see what the page looked like.'
-    );
+    log('DONE', `Renamed ${files[0]} → audio.mp3`);
+  }
+
+  if (!fs.existsSync(dest)) {
+    throw new Error('audio.mp3 still missing after all attempts');
   }
 
   const size = fs.statSync(dest).size;
-  console.log('File size:', (size / 1024 / 1024).toFixed(2), 'MB');
+  log('DONE', `File size: ${(size / 1024 / 1024).toFixed(2)} MB`);
+  if (size < 102_400) throw new Error(`audio.mp3 is too small (${size} bytes) — download likely failed`);
+
 })().catch(err => {
   console.error('ERROR:', err.message);
   process.exit(1);
