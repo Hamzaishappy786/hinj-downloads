@@ -69,10 +69,14 @@ jobs:
           path: output/audio.mp3
           retention-days: 1
 
-      - name: Take page screenshot on failure (for debugging)
-        if: failure()
+      - name: Upload debug screenshots (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshot
-          path: output/
+          name: debug-screenshots
+          path: |
+            output/after_conversion.png
+            output/after_click.png
+            output/error_no_input.png
+          if-no-files-found: ignore
           retention-days: 1
