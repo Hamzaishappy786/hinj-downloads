@@ -130,27 +130,34 @@ function downloadFile(url, dest) {
     console.log('[5/5] Downloading...');
     await downloadFile(audioUrl, path.join(OUTPUT_DIR, 'audio.mp3'));
   } else {
-    // Fall back: click the download button and wait for a response
-    console.log('[4/5] No URL in DOM, clicking download button...');
-    let dlBtn = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const btns = await page.$x('/html/body/form/div[3]/button[2]');
-      if (btns.length > 0) { dlBtn = btns[0]; break; }
-      console.log(`  Waiting 5s for download button (attempt ${attempt + 1}/4)...`);
-      await new Promise(r => setTimeout(r, 5_000));
-    }
+    // Fall back: find a button/link containing "download" text and click it
+    console.log('[4/5] No URL in DOM, searching for download button by text...');
+    const dlBtn = await page.evaluateHandle(() => {
+      const candidates = [...document.querySelectorAll('button, a, input[type=submit]')];
+      return candidates.find(el => el.textContent.toLowerCase().includes('download')) || null;
+    });
 
-    if (dlBtn) {
-      // Get the href/action before clicking
-      const btnUrl = await page.evaluate(btn => {
-        return btn.getAttribute('data-url') || btn.getAttribute('data-href')
-          || btn.getAttribute('data-link') || btn.closest('a')?.href || null;
+    const isValid = dlBtn && await page.evaluate(el => el !== null && el !== undefined, dlBtn);
+
+    if (isValid) {
+      const btnUrl = await page.evaluate(el => {
+        return el.getAttribute('data-url') || el.getAttribute('data-href')
+          || el.getAttribute('href') || null;
       }, dlBtn);
-      console.log('Button data URL:', btnUrl);
+      console.log('Download button found, data URL:', btnUrl);
 
-      await dlBtn.click();
-      await new Promise(r => setTimeout(r, 8_000));
-      await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_click.png') });
+      if (btnUrl && btnUrl.startsWith('http')) {
+        // Use the URL directly — most reliable
+        console.log('[5/5] Downloading from button URL:', btnUrl);
+        await downloadFile(btnUrl, path.join(OUTPUT_DIR, 'audio.mp3'));
+      } else {
+        await dlBtn.click();
+        await new Promise(r => setTimeout(r, 8_000));
+      }
+      await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_click.png') }).catch(() => {});
+    } else {
+      await page.screenshot({ path: path.join(OUTPUT_DIR, 'after_click.png') }).catch(() => {});
+      console.log('No download button found by text search either');
     }
   }
 

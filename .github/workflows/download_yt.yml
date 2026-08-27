@@ -27,9 +27,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install system Chromium
-        run: sudo apt-get install -y chromium-browser
-
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
@@ -39,8 +36,12 @@ jobs:
       - name: Install puppeteer-core
         run: npm install puppeteer-core@21
 
-      - name: Set Chromium path
-        run: echo "PUPPETEER_EXECUTABLE_PATH=$(which chromium-browser || which chromium)" >> $GITHUB_ENV
+      - name: Find pre-installed Chrome
+        run: |
+          CHROME=$(which google-chrome-stable || which google-chrome || which chromium-browser || which chromium)
+          echo "PUPPETEER_EXECUTABLE_PATH=$CHROME" >> $GITHUB_ENV
+          echo "Using browser: $CHROME"
+          $CHROME --version
 
       - name: Create output directory
         run: mkdir -p output
