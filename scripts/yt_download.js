@@ -4,7 +4,7 @@
  * Output: ./output/audio.mp3
  */
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 const fs        = require('fs');
 const path      = require('path');
 const https     = require('https');
@@ -44,7 +44,8 @@ function downloadFile(url, dest) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: 'new',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     defaultViewport: { width: 1280, height: 800 }
   });
@@ -90,9 +91,15 @@ function downloadFile(url, dest) {
   console.log('[3/4] Waiting 18 seconds for conversion...');
   await new Promise(r => setTimeout(r, 18_000));
 
-  // Click the Download button
-  const [downloadBtn] = await page.$x('/html/body/form/div[3]/button[2]');
-  if (!downloadBtn) throw new Error('Download button not found — conversion may have failed or taken longer than expected');
+  // Wait for the download button (retry up to 3 times, 8s apart)
+  let downloadBtn = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const btns = await page.$x('/html/body/form/div[3]/button[2]');
+    if (btns.length > 0) { downloadBtn = btns[0]; break; }
+    console.log(`Download button not visible yet, waiting 8s (attempt ${attempt + 1}/3)...`);
+    await new Promise(r => setTimeout(r, 8_000));
+  }
+  if (!downloadBtn) throw new Error('Download button not found after retries — conversion may have failed or y2mate.gs is down');
   await downloadBtn.click();
 
   // Wait for the file to land in OUTPUT_DIR
