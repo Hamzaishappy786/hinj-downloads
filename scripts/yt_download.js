@@ -207,15 +207,19 @@ async function findElement(page, strategies) {
   await sleep(500);
   await screenshot(page, '04_after_convert_click.png');
 
-  // ── Step 5: Wait and retry for the Download button (10 attempts) ──────────
-  log('5/6', 'Waiting for conversion + download button (up to 10 tries × 8s each)...');
+  // ── Step 5: Wait for conversion result — poll every 500ms instead of fixed sleeps ──
+  log('5/6', 'Polling for download button (max 80s, checking every 500ms)...');
 
   let audioUrl    = null;
   let downloadBtn = null;
+  const POLL_INTERVAL = 500;
+  const MAX_WAIT_MS   = 80_000;
+  const started       = Date.now();
+  let attempt         = 0;
 
-  for (let attempt = 1; attempt <= 10; attempt++) {
-    log('5/6', `Attempt ${attempt}/10 — waiting 8s...`);
-    await sleep(8_000);
+  while (Date.now() - started < MAX_WAIT_MS) {
+    attempt++;
+    await sleep(POLL_INTERVAL);
 
     // 1. Try to read audio URL directly from DOM (most reliable)
     audioUrl = await page.evaluate(() => {
@@ -233,7 +237,7 @@ async function findElement(page, strategies) {
     });
 
     if (audioUrl) {
-      log('5/6', `Audio URL found in DOM on attempt ${attempt}: ${audioUrl.slice(0,100)}`);
+      log('5/6', `Audio URL found in DOM after ${((Date.now()-started)/1000).toFixed(1)}s: ${audioUrl.slice(0,100)}`);
       break;
     }
 
@@ -254,19 +258,19 @@ async function findElement(page, strategies) {
     ]);
 
     if (downloadBtn) {
-      log('5/6', `Download button found on attempt ${attempt}`);
+      log('5/6', `Download button found after ${((Date.now()-started)/1000).toFixed(1)}s`);
       break;
     }
 
-    await screenshot(page, `05_attempt_${attempt}.png`);
-    log('5/6', `Attempt ${attempt}: nothing yet — page title: "${await page.title()}"`);
-
-    // Dump visible text to help debug
-    if (attempt === 3 || attempt === 6 || attempt === 10) {
-      const txt = await page.evaluate(() => document.body.innerText.slice(0, 500));
-      log('DEBUG', `Page text snippet:\n${txt}`);
+    // Take a screenshot + dump page text every ~15s to help with debugging
+    const elapsed = Date.now() - started;
+    if (elapsed > 0 && Math.floor(elapsed / 15_000) !== Math.floor((elapsed - POLL_INTERVAL) / 15_000)) {
+      await screenshot(page, `05_at_${Math.floor(elapsed/1000)}s.png`);
+      const txt = await page.evaluate(() => document.body.innerText.slice(0, 400));
+      log('DEBUG', `t=${Math.floor(elapsed/1000)}s — page: "${await page.title()}" — text: ${txt.replace(/\n/g,' ').slice(0,200)}`);
     }
   }
+  log('5/6', `Poll finished — elapsed: ${((Date.now()-started)/1000).toFixed(1)}s, attempts: ${attempt}`);
 
   await screenshot(page, '05_after_wait.png');
 
@@ -304,8 +308,8 @@ async function findElement(page, strategies) {
   } else {
     await screenshot(page, '06_nothing_found.png');
     throw new Error(
-      'No audio URL found after 10 attempts.\n' +
-      'Check screenshots (01_home.png … 05_attempt_*.png) uploaded as debug-screenshots artifact.'
+      'No audio URL found after 80s of polling.\n' +
+      'Check screenshots (01_home.png … 05_at_*.png) uploaded as debug-screenshots artifact.'
     );
   }
 
